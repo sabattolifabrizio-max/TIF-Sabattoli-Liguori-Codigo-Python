@@ -1,0 +1,342 @@
+import pandas as pd
+import numpy as np
+import csv
+import matplotlib.pyplot as plt 
+import math
+import scipy.optimize as sco 
+from scipy.optimize import linprog 
+from scipy.optimize import minimize
+from scipy import stats
+import time
+import datetime as dt
+import statsmodels.api as sm #para las regresiones
+import statsmodels.stats.api as sms #para las regresiones
+import scipy.stats as ss
+import zipfile
+import io
+import re
+
+# Ruta del XLSX
+ruta = r"C:\Users\fabri\OneDrive\2025 - 2do cuatrimestre\Computacionales\Mio\datostesis-SF-LMactual(-30;+30).xlsx" #Cambiar según corresponda
+
+df = pd.read_excel(ruta, engine="openpyxl")
+
+
+display(df)  
+
+df.columns = (
+    df.columns
+    .str.strip()
+    .str.replace(" ", "_")
+    .str.replace("á", "a")
+    .str.replace("é", "e")
+    .str.replace("í", "i")
+    .str.replace("ó", "o")
+    .str.replace("ú", "u")
+)
+
+df = df.sort_values(["Ticker", "Fecha_de_EC"]).reset_index(drop=True)
+
+df["Delta_EPS"] = df.groupby("Ticker")["EPS_A"].diff(4)       
+df["Desvio_8t"] = (
+    df.groupby("Ticker")["Delta_EPS"]
+    .rolling(window=8, min_periods=4)                         
+    .reset_index(level=0, drop=True)
+)
+df["SUE"] = df["Delta_EPS"] / df["Desvio_8t"]
+
+df["SUR"] = (df["Revenue_A"] - df["Revenue_E"]) / df["Revenue_E"]
+
+df["Grupo_EPS"] = np.where(df["SUE"] > 0, "Positiva", "Negativa")
+df["Grupo_REV"] = np.where(df["SUR"] > 0, "Positiva", "Negativa")
+
+cols_precios = [c for c in df.columns if "Precio_Dia" in c or "Precio_EC" in c] 
+precios = df[cols_precios].apply(pd.to_numeric, errors='coerce')               
+precios = precios.div(precios["Precio_Dia_-1"], axis=0)                        
+
+def clasificar_combinado(row):
+    if row["Grupo_EPS"] == "Positiva" and row["Grupo_REV"] == "Positiva":
+        return "Ambas Positivas"
+    elif row["Grupo_EPS"] == "Negativa" and row["Grupo_REV"] == "Negativa":
+        return "Ambas Negativas"
+    elif row["Grupo_EPS"] == "Positiva" and row["Grupo_REV"] == "Negativa":
+        return "EPS Positiva / REV Negativa"
+    elif row["Grupo_EPS"] == "Negativa" and row["Grupo_REV"] == "Positiva":
+        return "EPS Negativa / REV Positiva"
+    else:
+        return np.nan  # por si hay valores faltantes
+
+df["Grupo_Comb"] = df.apply(clasificar_combinado, axis=1)
+
+def calcular_caar(df_original, grupo_col):                    
+    resultados = {}
+    for g in df_original[grupo_col].dropna().unique():      
+        idx = df_original.index[df_original[grupo_col] == g] 
+        rend_g = retornos.loc[idx]                  
+        aar = rend_g.mean(axis=0, skipna=True)               
+        caar = aar.cumsum() * 100                             
+        resultados[g] = caar                                  
+    return resultados 
+
+caar_comb = calcular_caar(df, "Grupo_Comb")
+
+dias = []
+for c in cols_precios:
+    if "Precio_EC" in c:
+        dias.append(0)
+    else:
+        match = re.search(r"[-+]?\d+", c)
+        dias.append(int(match.group()) if match else 0)
+
+plt.figure(figsize=(10,6))
+plt.title("CAAR combinado (EPS y Revenue) - Ventana ±30 días")
+plt.axvline(0, color="k", linestyle="--", alpha=0.8)
+
+if "Ambas Positivas" in caar_comb:
+    plt.plot(dias, caar_comb["Ambas Positivas"], label="Ambas Positivas (EPS+REV)", color="green")
+if "Ambas Negativas" in caar_comb:
+    plt.plot(dias, caar_comb["Ambas Negativas"], label="Ambas Negativas (EPS+REV)", color="red")
+if "EPS Positiva / REV Negativa" in caar_comb:
+    plt.plot(dias, caar_comb["EPS Positiva / REV Negativa"], label="EPS+ / REV–", color="orange")
+if "EPS Negativa / REV Positiva" in caar_comb:
+    plt.plot(dias, caar_comb["EPS Negativa / REV Positiva"], label="EPS– / REV+", color="blue")
+
+plt.xlabel("Días relativos al anuncio")
+plt.ylabel("CAAR (%)")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+ventana = [c for c in cols_precios if re.search(r"Precio_Dia_[-+]?(?:[0-9]|[12][0-9]|30)\b|Precio_EC", c)]
+df["CAR_30d"] = retornos[ventana].sum(axis=1)
+
+print("\n=== MODELO OLS: CAR_30d ~ SUE + SUR + Grupo_Comb ===")
+
+ols_data = df[["CAR_30d", "SUE", "SUR", "Grupo_Comb"]].dropna()
+
+dummies = pd.get_dummies(ols_data["Grupo_Comb"], drop_first=True)
+dummies.columns = [c.replace(" ", "_").replace("/", "_").replace("+", "Pos").replace("-", "Neg") for c in dummies.columns]
+
+X = pd.concat([ols_data[["SUE", "SUR"]], dummies], axis=1)
+X = sm.add_constant(X)
+
+X = X.apply(pd.to_numeric, errors="coerce")
+y = pd.to_numeric(ols_data["CAR_30d"], errors="coerce")
+
+valid_idx = X.dropna().index.intersection(y.dropna().index)
+X = X.loc[valid_idx]
+y = y.loc[valid_idx]
+
+X = X.astype(float)
+
+modelo = sm.OLS(y, X).fit()
+print(modelo.summary())
+
+print("\n Interpretación:")
+print("• β(SUE): impacto de la sorpresa de EPS sobre el CAR_30d.")
+print("• β(SUR): impacto de la sorpresa de Revenue sobre el CAR_30d.")
+print("• Los coeficientes de grupos se interpretan respecto al grupo base ('Ambas Negativas').")
+print("• R² mide el poder explicativo general del modelo. p-valores < 0.05 indican significancia estadística.")
+
+ventana_5 = ["Precio_EC"] + [f"Precio_Dia_+{i}" for i in range(1,6)]
+ventana_10 = ["Precio_EC"] + [f"Precio_Dia_+{i}" for i in range(1,11)]
+ventana_30 = ["Precio_EC"] + [f"Precio_Dia_+{i}" for i in range(1,31)]
+
+df["CAR_5d"] = retornos[ventana_5].sum(axis=1)
+df["CAR_10d"] = retornos[ventana_10].sum(axis=1)
+df["CAR_30d"] = retornos[ventana_30].sum(axis=1)
+
+def correr_regresion(dep_var):
+    print(f"\n=== MODELO OLS: {dep_var} ~ SUE + SUR + Grupo_Comb ===")
+    ols_data = df[[dep_var, "SUE", "SUR", "Grupo_Comb"]].dropna()
+
+   
+    dummies = pd.get_dummies(ols_data["Grupo_Comb"], drop_first=True)
+    dummies.columns = [c.replace(" ", "").replace("/", "").replace("+", "Pos").replace("-", "Neg") for c in dummies.columns]
+
+   
+    X = pd.concat([ols_data[["SUE", "SUR"]], dummies], axis=1)
+    X = sm.add_constant(X).astype(float)
+    y = pd.to_numeric(ols_data[dep_var], errors="coerce")
+
+  
+    valid_idx = X.dropna().index.intersection(y.dropna().index)
+    X, y = X.loc[valid_idx], y.loc[valid_idx]
+
+   
+    modelo = sm.OLS(y, X).fit()
+    print(modelo.summary())
+    return modelo
+
+
+modelo_5d = correr_regresion("CAR_5d")
+modelo_10d = correr_regresion("CAR_10d")
+modelo_30d = correr_regresion("CAR_30d")
+
+
+coef_df = pd.DataFrame({
+    "Ventana": ["0,+5", "0,+10", "0,+30"],
+    "Coef_SUE": [
+        modelo_5d.params.get("SUE", 0),
+        modelo_10d.params.get("SUE", 0),
+        modelo_30d.params.get("SUE", 0)
+    ],
+    "Coef_SUR": [
+        modelo_5d.params.get("SUR", 0),
+        modelo_10d.params.get("SUR", 0),
+        modelo_30d.params.get("SUR", 0)
+    ]
+})
+
+coef_df.plot(
+    x="Ventana",
+    y=["Coef_SUE", "Coef_SUR"],
+    kind="bar",
+    figsize=(8,5),
+    edgecolor="black"
+)
+
+plt.title("Comparación de coeficientes OLS (SUE y SUR) por ventana")
+plt.ylabel("Coeficiente estimado")
+plt.xlabel("Ventana del evento")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show() 
+
+def calcular_caar(df_original, grupo_col):
+    grupos = df_original[grupo_col].dropna().unique()
+    resultados = {}
+    for g in grupos:
+        sub = df_original[df_original[grupo_col] == g]
+        rend = retornos.loc[sub.index]
+        aar = rend.mean(axis=0)
+        caar = aar.cumsum() * 100
+        resultados[g] = caar
+    return resultados
+
+caar_eps = calcular_caar(df, "Grupo_EPS")
+
+caar_rev = calcular_caar(df, "Grupo_REV")
+
+dias = []
+for c in cols_precios:
+    if "Precio EC" in c:
+        dias.append(0)
+    else:
+        match = re.search(r"[-+]?\d+", c)
+        dias.append(int(match.group()) if match else 0)
+
+plt.figure(figsize=(10,6))
+plt.title("CAAR por tipo de sorpresa - EPS (SUE estandarizado)")
+plt.axvline(0, color="k", linestyle="--", alpha=0.8)
+if "Positiva" in caar_eps:
+    plt.plot(dias, caar_eps["Positiva"], label="SUE Positiva (good news)", color="green")
+if "Negativa" in caar_eps:
+    plt.plot(dias, caar_eps["Negativa"], label="SUE Negativa (bad news)", color="red")
+plt.xlabel("Días relativos al anuncio")
+plt.ylabel("CAAR (%)")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+plt.figure(figsize=(10,6))
+plt.title("CAAR por tipo de sorpresa - Revenue (RSR relativa)")
+plt.axvline(0, color="k", linestyle="--", alpha=0.8)
+if "Positiva" in caar_rev:
+    plt.plot(dias, caar_rev["Positiva"], label="RSR Positiva (good news)", color="blue")
+if "Negativa" in caar_rev:
+    plt.plot(dias, caar_rev["Negativa"], label="RSR Negativa (bad news)", color="orange")
+plt.xlabel("Días relativos al anuncio")
+plt.ylabel("CAAR (%)")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+ventana = [c for c in cols_precios if re.search(r"D[ií]a [-+]?(?:[0-9]|[12][0-9]|30)\b|EC", c)]
+print(f"\nVentana de evento seleccionada (larga): {ventana}")
+
+df["CAR_EPS"] = retornos[ventana].sum(axis=1)
+df["CAR_REV"] = retornos[ventana].sum(axis=1)
+
+resumen_eps = (
+    df.groupby("Grupo_EPS")["CAR_EPS"]
+    .agg(["mean", "std", "count"])
+    .rename(columns={"mean": "Media CAR (±30d)", "std": "Desvío", "count": "N"})
+)
+resumen_eps["t-stat"] = resumen_eps["Media CAR (±30d)"] / (resumen_eps["Desvío"] / np.sqrt(resumen_eps["N"]))
+resumen_eps["p-value"] = 2 * (1 - stats.t.cdf(abs(resumen_eps["t-stat"]), df=resumen_eps["N"] - 1))
+
+print("\n=== Resumen CAR individuales por tipo de sorpresa (EPS, ventana ±30d) ===")
+print(resumen_eps.round(4))
+
+resumen_rev = (
+    df.groupby("Grupo_REV")["CAR_REV"]
+    .agg(["mean", "std", "count"])
+    .rename(columns={"mean": "Media CAR (±30d)", "std": "Desvío", "count": "N"})
+)
+resumen_rev["t-stat"] = resumen_rev["Media CAR (±30d)"] / (resumen_rev["Desvío"] / np.sqrt(resumen_rev["N"]))
+resumen_rev["p-value"] = 2 * (1 - stats.t.cdf(abs(resumen_rev["t-stat"]), df=resumen_rev["N"] - 1))
+
+print("\n=== Resumen CAR individuales por tipo de sorpresa (Revenue, ventana ±30d) ===")
+print(resumen_rev.round(4))
+
+pos_eps = df[df["Grupo_EPS"] == "Positiva"]["CAR_EPS"].dropna()
+neg_eps = df[df["Grupo_EPS"] == "Negativa"]["CAR_EPS"].dropna()
+pos_rev = df[df["Grupo_REV"] == "Positiva"]["CAR_REV"].dropna()
+neg_rev = df[df["Grupo_REV"] == "Negativa"]["CAR_REV"].dropna()
+
+if len(pos_eps) > 1 and len(neg_eps) > 1:
+    t_eps, p_eps = stats.ttest_ind(pos_eps, neg_eps, equal_var=False)
+    print(f"\nPrueba t (EPS ±30d): Positiva vs Negativa → t = {t_eps:.3f}, p = {p_eps:.4f}")
+
+if len(pos_rev) > 1 and len(neg_rev) > 1:
+    t_rev, p_rev = stats.ttest_ind(pos_rev, neg_rev, equal_var=False)
+    print(f"Prueba t (Revenue ±30d): Positiva vs Negativa → t = {t_rev:.3f}, p = {p_rev:.4f}")
+
+if "Subsector" not in df.columns:  
+    raise KeyError("No se encontró la columna 'Subsector' en el DataFrame.")
+
+resumen_subsectores = (
+    df.groupby("Subsector")["CAR_30d"]
+    .agg(["mean", "std", "count"])
+    .rename(columns={"mean": "Media CAR (±30d)", "std": "Desvío", "count": "N"})
+    .sort_values("Media CAR (±30d)", ascending=False)
+)
+
+grupos_subsectores = [g["CAR_30d"].dropna().values for _, g in df.groupby("Subsector")]
+f_stat, p_val = stats.f_oneway(*grupos_subsectores)
+
+print("\n=== Comparación de reacción entre subsectores (ANOVA) ===")
+print(resumen_subsectores.round(4))
+print(f"\nPrueba ANOVA: F = {f_stat:.3f}, p = {p_val:.4f}")
+if p_val < 0.05:
+    print("→ Existen diferencias significativas en la reacción del mercado entre subsectores.")
+else:
+    print("→ No se observan diferencias estadísticamente significativas entre subsectores.")
+
+
+def calcular_caar_subsector(df_original):
+    subsectores = df_original["Subsector"].dropna().unique()
+    resultados = {}
+    for s in subsectores:
+        sub = df_original[df_original["Subsector"] == s]
+        rend = retornos.loc[sub.index]
+        aar = rend.mean(axis=0)
+        caar = aar.cumsum() * 100
+        resultados[s] = caar
+    return resultados
+
+caar_subs = calcular_caar_subsector(df)
+
+plt.figure(figsize=(10,6))
+plt.title("Comparación de la velocidad de ajuste por Subsector (CAAR ±30d)")
+plt.axvline(0, color="k", linestyle="--", alpha=0.7)
+
+for s, serie in caar_subs.items():
+    plt.plot(dias, serie, label=s)
+
+plt.xlabel("Días relativos al anuncio")
+plt.ylabel("CAAR (%)")
+plt.legend(title="Subsector")
+plt.grid(alpha=0.3)
+plt.show()
