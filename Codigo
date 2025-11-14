@@ -28,22 +28,18 @@ df.columns = (
     df.columns
     .str.strip()
     .str.replace(" ", "_")
-    .str.replace("á", "a")
-    .str.replace("é", "e")
     .str.replace("í", "i")
-    .str.replace("ó", "o")
-    .str.replace("ú", "u")
 )
 
 df = df.sort_values(["Ticker", "Fecha_de_EC"]).reset_index(drop=True)
 
-df["Delta_EPS"] = df.groupby("Ticker")["EPS_A"].diff(4)       
-df["Desvio_8t"] = (
-    df.groupby("Ticker")["Delta_EPS"]
-    .rolling(window=8, min_periods=4)                         
+df["SUE_std"] = (
+    df.groupby("Ticker")["EPS_Surprise"]       
+    .rolling(window=8, min_periods=4)           
+    .std()                                       
     .reset_index(level=0, drop=True)
 )
-df["SUE"] = df["Delta_EPS"] / df["Desvio_8t"]
+df["SUE"] = df["EPS_Surprise"] / df["SUE_std"]
 
 df["SUR"] = (df["Revenue_A"] - df["Revenue_E"]) / df["Revenue_E"]
 
