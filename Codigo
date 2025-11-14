@@ -33,6 +33,7 @@ df.columns = (
 
 df = df.sort_values(["Ticker", "Fecha_de_EC"]).reset_index(drop=True)
 
+df["EPS_Surprise"] = df["EPS_A"] - df["EPS_E"]
 df["SUE_std"] = (
     df.groupby("Ticker")["EPS_Surprise"]       
     .rolling(window=8, min_periods=4)           
