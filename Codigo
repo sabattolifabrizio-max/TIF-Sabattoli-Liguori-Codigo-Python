@@ -15,6 +15,7 @@ import scipy.stats as ss
 import zipfile
 import io
 import re
+import seaborn as sns
 
 # Ruta del XLSX
 ruta = r"C:\Users\fabri\OneDrive\2025 - 2do cuatrimestre\Computacionales\Mio\datostesis-SF-LMactual(-30;+30).xlsx" #Cambiar según corresponda
@@ -239,6 +240,32 @@ plt.show()
 
 ############################################################
 
+print(f"N° total de observaciones con SUE calculado: {df['SUE'].notna().sum()}")
+
+df_check = df.loc[df["SUE"].notna(), ["Ticker", "Fecha_de_EC", "EPS_A", "EPS_E", "EPS_Surprise", "SUE_std", "SUE"]].copy()
+
+top5 = df_check.sort_values("SUE", ascending=False).head(5)
+bot5 = df_check.sort_values("SUE", ascending=True).head(5)
+
+print("\n🟢 Top 5 SUE (esperado: EPS_A > EPS_E o mejora interanual):")
+print(top5.to_string(index=False))
+
+print("\n🔴 Bottom 5 SUE (esperado: EPS_A < EPS_E o caída interanual):")
+print(bot5.to_string(index=False))
+
+
+signo_summary = df_check.assign(SUE_sign=np.sign(df_check["SUE"])).groupby("SUE_sign")[["EPS_Surprise"]].mean()
+print("\nPromedio de EPS_Surprise por signo de SUE:")
+print(signo_summary)
+
+
+if signo_summary.loc[1.0, "EPS_Surprise"] > signo_summary.loc[-1.0, "EPS_Surprise"]:
+    print("\n✅ El signo del SUE está correctamente definido (positivo = mejora de EPS).")
+else:
+    print("\n⚠ El signo del SUE parece invertido (positivo = caída de EPS). Revisar orden en la resta EPS_Surprise.")
+
+############################################################
+
 def calcular_caar(df_original, grupo_col):
     grupos = df_original[grupo_col].dropna().unique()
     resultados = {}
@@ -376,4 +403,9 @@ plt.xlabel("Días relativos al anuncio")
 plt.ylabel("CAAR (%)")
 plt.legend(title="Subsector")
 plt.grid(alpha=0.3)
+plt.show()
+
+sns.countplot(data=df, x="Grupo_EPS", hue="Subsector")
+plt.title("Distribución de Sorpresas de EPS por Subsector")
+plt.tight_layout()
 plt.show()
